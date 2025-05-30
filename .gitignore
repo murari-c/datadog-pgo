@@ -1,0 +1,7 @@
+*.pgo
+*.txt
+*.out
+vendor/*
+.vscode
+.netrc
+main

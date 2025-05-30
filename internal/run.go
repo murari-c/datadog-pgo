@@ -1,4 +1,4 @@
-package main
+package internal
 
 import (
 	"archive/zip"
@@ -28,18 +28,8 @@ const (
 	version = "0.0.1"
 )
 
-// main runs the pgo tool.
-func main() {
-	if err := run(); err != nil && !errors.As(err, &handledError{}) {
-		if !errors.As(err, &loggedError{}) {
-			fmt.Fprintf(os.Stderr, "pgo: error: %v\n", err)
-		}
-		os.Exit(1)
-	}
-}
-
 // run runs the pgo tool and returns an error if any.
-func run() (err error) {
+func RunMainCmdLine() (err error) {
 	start := time.Now()
 
 	// Define usage
@@ -90,8 +80,6 @@ OPTIONS`
 		return errors.New("at least 2 arguments are required")
 	}
 
-	// Split args into queries and dst
-	queries := buildQueries(*fromF, *profilesF, flag.Args()[:flag.NArg()-1])
 	dst := flag.Arg(flag.NArg() - 1)
 
 	// Setup logger
@@ -99,6 +87,7 @@ OPTIONS`
 	if *verboseF {
 		logOpt.Level = slog.LevelDebug
 	}
+
 	log := slog.New(tint.NewHandler(os.Stdout, &tint.Options{
 		AddSource:  logOpt.AddSource,
 		Level:      logOpt.Level,
@@ -108,39 +97,9 @@ OPTIONS`
 	if *jsonF {
 		log = slog.New(slog.NewJSONHandler(os.Stdout, logOpt))
 	}
-	log.Info(name, "version", version, "go-version", runtime.Version())
 
-	// Log errors and turn them into warnings unless -fail is set
-	defer func() {
-		if err == nil {
-			return
-		}
-		log.Error(err.Error())
-		err = loggedError{err}
-		if !*failF {
-			err = handledError{err}
-			log.Warn(name + " failed, but -fail is not set, returning exit code 0 to continue without PGO")
-		}
-	}()
-
-	// Setup API client
-	client, err := ClientFromEnv()
+	mergedProfile, err := ExtractMergedProfile(*fromF, *timeoutF, *profilesF, *failF, true, log, flag.Args()[:flag.NArg()-1]...)
 	if err != nil {
-		return fmt.Errorf("clientFromEnv: %w", err)
-	}
-
-	// Create context
-	ctx, cancel := context.WithTimeout(context.Background(), *timeoutF)
-	defer cancel()
-
-	// Search, download and merge profiles
-	mergedProfile, err := SearchDownloadMerge(ctx, log, client, queries)
-	if err != nil {
-		return err
-	}
-
-	// Apply no inline hack
-	if err := mergedProfile.ApplyNoInlineHack(); err != nil {
 		return err
 	}
 
@@ -158,6 +117,55 @@ OPTIONS`
 		"debug-query", mergedProfile.DebugQuery(),
 	)
 	return nil
+}
+
+func ExtractMergedProfile(
+	from, timeout time.Duration, profiles int,
+	fail, shouldUsePGOEndpoint bool,
+	log *slog.Logger,
+	inputQueries ...string,
+) (*MergedProfile, error) {
+	var err error
+	// Split args into queries and dst
+	queries := buildQueries(from, profiles, inputQueries)
+
+	log.Info(name, "version", version, "go-version", runtime.Version())
+
+	// Log errors and turn them into warnings unless -fail is set
+	defer func() {
+		if err == nil {
+			return
+		}
+		log.Error(err.Error())
+		err = LoggedError{err}
+		if !fail {
+			err = HandledError{err}
+			log.Warn(name + " failed, but -fail is not set, returning exit code 0 to continue without PGO")
+		}
+	}()
+
+	// Setup API client
+	client, err := ClientFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("clientFromEnv: %w", err)
+	}
+
+	// Create context
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	// Search, download and merge profiles
+	mergedProfile, err := SearchDownloadMerge(ctx, log, client, queries, shouldUsePGOEndpoint)
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply no inline hack
+	if err := mergedProfile.ApplyNoInlineHack(); err != nil {
+		return nil, err
+	}
+
+	return mergedProfile, nil
 }
 
 // buildQueries returns a list of SearchQuery for the given time window and queries.
@@ -190,11 +198,11 @@ func buildQueries(window time.Duration, limit int, queries []string) (searchQuer
 // usePGOEndpoint is a flag to use the pgo endpoint instead of the search and
 // download endpoints. If this new endpoint proves to work well, we can remove
 // this flag and the old code.
-const usePGOEndpoint = true
+const usePGOEndpoint = false
 
 // SearchDownloadMerge queries the profiles, downloads them and merges them into a single profile.
-func SearchDownloadMerge(ctx context.Context, log *slog.Logger, client *Client, queries []SearchQuery) (*MergedProfile, error) {
-	if usePGOEndpoint {
+func SearchDownloadMerge(ctx context.Context, log *slog.Logger, client *Client, queries []SearchQuery, shouldUsePGOEndpoint bool) (*MergedProfile, error) {
+	if shouldUsePGOEndpoint {
 		return searchDownloadMergePGOEndpoint(ctx, log, client, queries)
 	}
 	return searchDownloadMerge(ctx, log, client, queries)
@@ -299,6 +307,12 @@ type MergedProfile struct {
 	mu         sync.Mutex
 	profile    *profile.Profile
 	profileIDs []string
+}
+
+func (m *MergedProfile) GetProfile() *profile.Profile {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.profile
 }
 
 // Merge merges prof into the current profile. Callers must not use prof after
@@ -483,12 +497,12 @@ func (c *countingWriter) Write(p []byte) (n int, err error) {
 	return
 }
 
-// loggedError is an error that has been logged.
-type loggedError struct {
+// LoggedError is an error that has been logged.
+type LoggedError struct {
 	error
 }
 
-// handledError is an error that has been handled.
-type handledError struct {
+// HandledError is an error that has been handled.
+type HandledError struct {
 	error
 }

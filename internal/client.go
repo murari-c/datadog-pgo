@@ -1,4 +1,4 @@
-package main
+package internal
 
 import (
 	"bytes"
@@ -51,10 +51,16 @@ func (c *Client) SearchAndDownloadProfiles(ctx context.Context, queries []Search
 		Queries []SearchQuery `json:"queries"`
 	}{queries}
 
+	fmt.Println("[debug] Downloading profiles....")
+
 	data, err := c.post(ctx, "/api/unstable/profiles/gopgo", payload)
 	if err != nil {
+		fmt.Println("[debug] Error downloading profiles:", err)
 		return nil, err
 	}
+
+	fmt.Println("[debug] Downloaded profiles successfully")
+
 	return &ProfilesDownload{data: data}, nil
 }
 
